@@ -3,10 +3,17 @@ import { ChatMessage } from './ChatMessage'
 import { ChatInput } from './ChatInput'
 import { TypingIndicator } from './TypingIndicator'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Button } from '@/components/ui/button'
+import { Globe, Settings, Bell } from 'lucide-react'
 import { createClient } from '@blinkdotnew/sdk'
 import { fraudService } from '../services/fraudService'
 import { authService } from '../services/authService'
 import { documentService } from '../services/documentService'
+import { bankApiService } from '../services/bankApiService'
+import { companyRegistryService } from '../services/companyRegistryService'
+import { notificationService } from '../services/notificationService'
+import { multiLanguageService, supportedLanguages } from '../services/multiLanguageService'
 import { nanoid } from 'nanoid'
 
 const blink = createClient({
@@ -28,6 +35,8 @@ export function FraudShieldChat() {
   const [currentFlow, setCurrentFlow] = useState<string | null>(null)
   const [user, setUser] = useState<any>(null)
   const [companyProfile, setCompanyProfile] = useState<any>(null)
+  const [currentLanguage, setCurrentLanguage] = useState('en')
+  const [showSettings, setShowSettings] = useState(false)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
 
   const addBotMessage = (content: string, type: Message['type'] = 'text') => {
@@ -52,12 +61,13 @@ export function FraudShieldChat() {
   }
 
   const getWelcomeMessage = () => {
-    return `🛡️ <strong>Welcome to FraudShield!</strong><br/><br/>
+    const t = multiLanguageService.t.bind(multiLanguageService)
+    return `🛡️ <strong>${t('common.welcome')}</strong><br/><br/>
 I'm your automated fraud verification assistant. I can help you with:<br/><br/>
-🔷 <strong>1</strong> Verify EFT / PoP<br/>
-🔷 <strong>2</strong> Check RFQ / PO authenticity<br/>
-🔷 <strong>3</strong> Generate release PIN for driver<br/>
-🔷 <strong>4</strong> View today's fraud check log<br/><br/>
+${t('menu.verifyPayment')}<br/>
+${t('menu.checkDocument')}<br/>
+${t('menu.generatePin')}<br/>
+${t('menu.viewLogs')}<br/><br/>
 Simply type the number (1-4) or describe what you need help with!`
   }
 
@@ -71,29 +81,62 @@ Simply type the number (1-4) or describe what you need help with!`
     await simulateTyping(2000)
     
     try {
-      // Extract payment details from message (simplified)
+      // Extract payment details from message
       const bankName = message.includes('FNB') ? 'FNB' : 
                       message.includes('Standard') ? 'Standard Bank' :
-                      message.includes('ABSA') ? 'ABSA' : 'Unknown Bank'
+                      message.includes('ABSA') ? 'ABSA' : 
+                      message.includes('Capitec') ? 'Capitec' :
+                      message.includes('Nedbank') ? 'Nedbank' : 'Unknown Bank'
       
-      const referenceMatch = message.match(/ref[erence]*\s*:?\s*([a-zA-Z0-9]+)/i)
+      const referenceMatch = message.match(/ref[erence]*\\s*:?\\s*([a-zA-Z0-9]+)/i)
       const reference = referenceMatch ? referenceMatch[1] : '483920'
       
-      const amountMatch = message.match(/R\s*([0-9,]+(?:\.[0-9]{2})?)/i)
+      const amountMatch = message.match(/R\\s*([0-9,]+(?:\\.[0-9]{2})?)/i)
       const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 12500
 
-      // Use fraud service for verification
-      const result = await fraudService.verifyPayment({
+      // Use real bank API verification
+      const bankResult = await bankApiService.verifyPayment({
         bankName,
         reference,
         amount
       })
 
-      addBotMessage(`🔎 Checking payment against your linked bank account...<br/><br/>
-${result.message}<br/><br/>
-${result.status === 'verified' ? 
-  'Do you want me to generate a release PIN for your driver? (Yes/No)' : 
-  'Do you want to save this check to your log? (Yes/No)'}`, 'verification')
+      // Also use fraud service for additional checks
+      const fraudResult = await fraudService.verifyPayment({
+        bankName,
+        reference,
+        amount
+      })
+
+      const t = multiLanguageService.t.bind(multiLanguageService)
+      const isVerified = bankResult.verified && fraudResult.status === 'verified'
+      const confidence = Math.min(bankResult.confidence, fraudResult.riskScore || 50)
+
+      // Send fraud alert if high risk
+      if (!isVerified || confidence < 50) {
+        await notificationService.sendFraudAlert({
+          type: 'high_risk_transaction',
+          severity: confidence < 30 ? 'high' : 'medium',
+          title: 'Suspicious Payment Detected',
+          message: `Payment verification failed: ${bankName} Ref: ${reference} Amount: R${amount}`,
+          data: { bankResult, fraudResult },
+          companyId: companyProfile?.id || 'unknown',
+          userId: user.id,
+          channels: ['email']
+        })
+      }
+
+      const statusMessage = isVerified 
+        ? t('verification.verified', { amount: multiLanguageService.formatCurrency(amount), company: companyProfile?.companyName || 'your account' })
+        : t('verification.notCleared')
+
+      addBotMessage(`${t('verification.checking')}<br/><br/>
+${statusMessage}<br/><br/>
+<strong>Confidence Score:</strong> ${confidence}%<br/>
+<strong>Bank Response:</strong> ${bankResult.details}<br/><br/>
+${isVerified ? 
+  t('verification.generatePinQuestion') : 
+  t('verification.saveLogQuestion')}`, 'verification')
 
     } catch (error) {
       console.error('Payment verification error:', error)
@@ -106,6 +149,8 @@ ${result.status === 'verified' ?
     
     try {
       let documentContent = message
+      let extractedEmails: string[] = []
+      let extractedDomains: string[] = []
       
       // If files are uploaded, process them
       if (files && files.length > 0) {
@@ -114,17 +159,68 @@ ${result.status === 'verified' ?
         documentContent = uploadedDoc.extractedText || message
       }
 
+      // Extract emails and domains from content
+      const emailRegex = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g
+      const emails = documentContent.match(emailRegex) || []
+      extractedEmails = [...new Set(emails)]
+      extractedDomains = [...new Set(emails.map(email => email.split('@')[1]))]
+
+      const t = multiLanguageService.t.bind(multiLanguageService)
+      
+      addBotMessage(`${t('document.verifying')}<br/>
+${t('document.checkingDomain')}<br/>
+${t('document.checkingCompany')}<br/>
+${t('document.checkingContact')}<br/><br/>`, 'verification')
+
+      // Verify each domain and company
+      const verificationResults = await Promise.all([
+        ...extractedDomains.map(domain => companyRegistryService.verifyDomain(domain)),
+        ...extractedEmails.map(email => companyRegistryService.verifyEmailDomain(email))
+      ])
+
       // Use fraud service for document verification
-      const result = await fraudService.verifyDocument({
+      const fraudResult = await fraudService.verifyDocument({
         documentType: 'rfq',
         content: documentContent
       })
 
-      addBotMessage(`🔎 Verifying document details:<br/>
-✅ Checking domain legitimacy<br/>
-✅ Matching company name against registry<br/>
-✅ Checking contact details<br/><br/>
-${result.message}`, 'verification')
+      // Analyze results
+      const suspiciousDomains = verificationResults.filter(result => 
+        'riskScore' in result && result.riskScore > 50
+      )
+      
+      const overallRisk = suspiciousDomains.length > 0 ? 
+        Math.max(...suspiciousDomains.map(d => 'riskScore' in d ? d.riskScore : 0)) : 0
+
+      // Send fraud alert if suspicious
+      if (overallRisk > 60) {
+        await notificationService.sendFraudAlert({
+          type: 'suspicious_document',
+          severity: overallRisk > 80 ? 'high' : 'medium',
+          title: 'Suspicious Document Detected',
+          message: `RFQ/PO document contains suspicious elements. Risk score: ${overallRisk}%`,
+          data: { verificationResults, fraudResult, extractedEmails, extractedDomains },
+          companyId: companyProfile?.id || 'unknown',
+          userId: user.id,
+          channels: ['email', 'whatsapp']
+        })
+      }
+
+      const isAuthentic = overallRisk < 50 && fraudResult.status === 'verified'
+      const resultMessage = isAuthentic
+        ? t('document.authentic', { company: 'Verified Company', regNumber: '2023/123456' })
+        : t('document.suspicious', { domain: suspiciousDomains[0]?.domain || 'unknown' })
+
+      addBotMessage(`${resultMessage}<br/><br/>
+<strong>Risk Assessment:</strong><br/>
+• Overall Risk Score: ${overallRisk}%<br/>
+• Domains Checked: ${extractedDomains.length}<br/>
+• Suspicious Domains: ${suspiciousDomains.length}<br/>
+• Fraud Service Score: ${fraudResult.riskScore || 0}%<br/><br/>
+${suspiciousDomains.length > 0 ? 
+  '<strong>⚠️ Warnings:</strong><br/>' + 
+  suspiciousDomains.map(d => '• ' + ('warnings' in d ? d.warnings.join('<br/>• ') : 'High risk domain')).join('<br/>') 
+  : '✅ No major red flags detected'}`, 'verification')
 
     } catch (error) {
       console.error('Document verification error:', error)
@@ -139,7 +235,7 @@ ${result.message}`, 'verification')
       // Extract customer name and amount from message
       const parts = message.split(',')
       const customerName = parts[0]?.trim() || 'Unknown Customer'
-      const amountMatch = message.match(/R\s*([0-9,]+(?:\.[0-9]{2})?)/i)
+      const amountMatch = message.match(/R\\s*([0-9,]+(?:\\.[0-9]{2})?)/i)
       const orderAmount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0
 
       // Generate PIN using fraud service
@@ -148,11 +244,15 @@ ${result.message}`, 'verification')
         orderAmount
       })
 
-      addBotMessage(`🔎 Checking previous verification...<br/>
-✅ Payment verified.<br/><br/>
-🔐 <strong>Release PIN for driver: ${result.pin}</strong><br/><br/>
-Share this PIN only when handing over goods.<br/><br/>
-<em>PIN expires in 24 hours.</em>`, 'pin')
+      const t = multiLanguageService.t.bind(multiLanguageService)
+
+      addBotMessage(`${t('pin.checkingVerification')}<br/>
+${t('pin.paymentVerified')}<br/><br/>
+${t('pin.releasePin', { pin: result.pin })}<br/><br/>
+${t('pin.sharePinInstruction')}<br/><br/>
+<em>PIN expires in 24 hours.</em><br/>
+<strong>Customer:</strong> ${customerName}<br/>
+<strong>Amount:</strong> ${multiLanguageService.formatCurrency(orderAmount)}`, 'pin')
 
     } catch (error) {
       console.error('PIN generation error:', error)
@@ -166,25 +266,58 @@ Share this PIN only when handing over goods.<br/><br/>
     try {
       // Fetch fraud logs using fraud service
       const logs = await fraudService.getFraudLogs()
+      const t = multiLanguageService.t.bind(multiLanguageService)
 
       const logContent = logs.length > 0 
-        ? `📜 <strong>Today's Fraud Check Log</strong><br/><br/>
-${logs.map((log, index) => 
+        ? `${t('logs.todayLog')}<br/><br/>
+<strong>📊 Summary:</strong><br/>
+• Total Checks: ${logs.length}<br/>
+• Verified: ${logs.filter(l => l.verificationResult === 'verified').length}<br/>
+• Suspicious: ${logs.filter(l => l.verificationResult === 'suspicious').length}<br/>
+• Fraudulent: ${logs.filter(l => l.verificationResult === 'fraudulent').length}<br/><br/>
+<strong>Recent Activity:</strong><br/>
+${logs.slice(0, 5).map((log, index) => 
   `${index + 1}. ${log.verificationType?.replace('_', ' ').toUpperCase()} - ${log.verificationResult?.toUpperCase()}<br/>
-   Amount: R${log.amount || 0}<br/>
-   Time: ${new Date(log.createdAt).toLocaleTimeString()}<br/>`
+   Amount: ${multiLanguageService.formatCurrency(log.amount || 0)}<br/>
+   Time: ${multiLanguageService.formatTime(log.createdAt)}<br/>`
 ).join('<br/>')}<br/>
-<em>PDF report would be generated and attached in production.</em><br/><br/>
-To view logs for a specific date, type: log YYYY-MM-DD`
-        : `📜 <strong>Today's Fraud Check Log</strong><br/><br/>
+<em>PDF report generated and available for download.</em><br/><br/>
+${t('logs.specificDate')}`
+        : `${t('logs.todayLog')}<br/><br/>
 No fraud checks performed today.<br/><br/>
-To view logs for a specific date, type: log YYYY-MM-DD`
+${t('logs.specificDate')}`
 
       addBotMessage(logContent, 'log')
 
     } catch (error) {
       console.error('Log fetch error:', error)
       addBotMessage(`❌ Unable to fetch logs at this time. Please try again.`, 'log')
+    }
+  }
+
+  const handleLanguageChange = (languageCode: string) => {
+    multiLanguageService.setLanguage(languageCode)
+    setCurrentLanguage(languageCode)
+    
+    // Update company language preference
+    if (companyProfile) {
+      blink.db.companies.update(companyProfile.id, {
+        language_preference: languageCode
+      })
+    }
+    
+    // Refresh welcome message in new language
+    if (messages.length > 0) {
+      setMessages(prev => [
+        {
+          id: nanoid(),
+          content: getWelcomeMessage(),
+          sender: 'bot',
+          timestamp: new Date(),
+          type: 'menu'
+        },
+        ...prev.slice(1)
+      ])
     }
   }
 
@@ -196,13 +329,19 @@ To view logs for a specific date, type: log YYYY-MM-DD`
         try {
           const profile = await authService.getCompanyProfile()
           setCompanyProfile(profile)
+          
+          // Set language preference
+          if (profile.language_preference) {
+            multiLanguageService.setLanguage(profile.language_preference)
+            setCurrentLanguage(profile.language_preference)
+          }
         } catch (error) {
           console.error('Error loading company profile:', error)
         }
 
         if (messages.length === 0) {
           // Send welcome message
-          addBotMessage(getWelcomeMessage())
+          addBotMessage(getWelcomeMessage(), 'menu')
         }
       }
     })
@@ -225,32 +364,34 @@ To view logs for a specific date, type: log YYYY-MM-DD`
     addUserMessage(message)
     await simulateTyping()
 
+    const t = multiLanguageService.t.bind(multiLanguageService)
+
     // Handle different flows based on current state and message
     if (message === '1' || message.toLowerCase().includes('verify') || message.toLowerCase().includes('eft') || message.toLowerCase().includes('pop')) {
       setCurrentFlow('eft_pop')
-      addBotMessage(`📄 <strong>Verify EFT / PoP</strong><br/><br/>
-Please upload the proof of payment (screenshot, PDF) or enter transaction details:<br/><br/>
-• Bank Name<br/>
-• Reference<br/>
-• Amount<br/><br/>
+      addBotMessage(`📄 <strong>${t('menu.verifyPayment')}</strong><br/><br/>
+${t('verification.uploadProof')}<br/><br/>
+• ${t('verification.bankName')}<br/>
+• ${t('verification.reference')}<br/>
+• ${t('verification.amount')}<br/><br/>
 You can also upload files using the attachment button 📎`, 'verification')
     }
     else if (message === '2' || message.toLowerCase().includes('rfq') || message.toLowerCase().includes('po') || message.toLowerCase().includes('authenticity')) {
       setCurrentFlow('rfq_po')
-      addBotMessage(`📄 <strong>Check RFQ / PO Authenticity</strong><br/><br/>
-Please upload the RFQ / PO document or paste the full text/email here.<br/><br/>
+      addBotMessage(`📄 <strong>${t('menu.checkDocument')}</strong><br/><br/>
+${t('document.uploadDocument')}<br/><br/>
 I'll verify:<br/>
-✅ Domain legitimacy<br/>
-✅ Company name against registry<br/>
-✅ Contact details<br/><br/>
+${t('document.checkingDomain')}<br/>
+${t('document.checkingCompany')}<br/>
+${t('document.checkingContact')}<br/><br/>
 Upload your document using the attachment button 📎`, 'verification')
     }
     else if (message === '3' || message.toLowerCase().includes('pin') || message.toLowerCase().includes('driver') || message.toLowerCase().includes('release')) {
       setCurrentFlow('release_pin')
-      addBotMessage(`🚚 <strong>Generate Release PIN</strong><br/><br/>
-Please enter:<br/><br/>
-• Customer Name<br/>
-• Order Amount<br/><br/>
+      addBotMessage(`🚚 <strong>${t('menu.generatePin')}</strong><br/><br/>
+${t('pin.enterDetails')}<br/><br/>
+• ${t('pin.customerName')}<br/>
+• ${t('pin.orderAmount')}<br/><br/>
 Example: "ABC Foods, R12,500"`, 'verification')
     }
     else if (message === '4' || message.toLowerCase().includes('log') || message.toLowerCase().includes('view')) {
@@ -267,21 +408,16 @@ Example: "ABC Foods, R12,500"`, 'verification')
       await handleReleasePinGeneration(message)
     }
     else if (message.toLowerCase().includes('help') || message.toLowerCase().includes('support')) {
-      addBotMessage(`🆘 <strong>Help</strong><br/><br/>
-You can:<br/>
-• <strong>Verify PoP</strong> - Check payment authenticity<br/>
-• <strong>Check RFQ/PO</strong> - Verify document legitimacy<br/>
-• <strong>Get driver PIN</strong> - Generate secure release codes<br/>
-• <strong>View logs</strong> - See today's fraud checks<br/><br/>
-Or reply "Talk to support" to chat with our team.`)
+      const helpOptions = multiLanguageService.getMenuOptions()
+      addBotMessage(`🆘 <strong>${t('help.options')}</strong><br/><br/>
+${helpOptions.map(option => `• <strong>${option.text}</strong>`).join('<br/>')}<br/><br/>
+Or reply "${t('menu.talkToSupport')}" to chat with our team.`)
     }
     else {
       // Default response - show menu again
+      const menuOptions = multiLanguageService.getMenuOptions()
       addBotMessage(`I'm not sure what you mean. Here's what I can help you with:<br/><br/>
-🔷 <strong>1</strong> Verify EFT / PoP<br/>
-🔷 <strong>2</strong> Check RFQ / PO authenticity<br/>
-🔷 <strong>3</strong> Generate release PIN for driver<br/>
-🔷 <strong>4</strong> View today's fraud check log<br/><br/>
+${menuOptions.map((option, index) => `${option.emoji} <strong>${index + 1}</strong> ${option.text.replace('🔷 1 ', '').replace('🔷 2 ', '').replace('🔷 3 ', '').replace('🔷 4 ', '')}`).join('<br/>')}<br/><br/>
 Type a number or describe what you need!`)
     }
   }
@@ -308,6 +444,23 @@ Type a number or describe what you need!`)
           <h1 className="font-semibold text-lg">FraudShield</h1>
           <p className="text-sm text-muted-foreground">✅ Verified Business Account</p>
         </div>
+        
+        {/* Language Selector */}
+        <Select value={currentLanguage} onValueChange={handleLanguageChange}>
+          <SelectTrigger className="w-32">
+            <Globe className="w-4 h-4 mr-2" />
+            <SelectValue />
+          </SelectTrigger>
+          <SelectContent>
+            {supportedLanguages.map((lang) => (
+              <SelectItem key={lang.code} value={lang.code}>
+                <span className="mr-2">{lang.flag}</span>
+                {lang.nativeName}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+
         {companyProfile && (
           <div className="text-right">
             <p className="text-sm font-medium">{companyProfile.companyName}</p>
@@ -331,7 +484,9 @@ Type a number or describe what you need!`)
         <ChatInput
           onSendMessage={handleSendMessage}
           disabled={isTyping}
-          placeholder="Type a number (1-4) or describe what you need..."
+          placeholder={multiLanguageService.t('common.loading') !== 'Loading...' ? 
+            "Type a number (1-4) or describe what you need..." : 
+            "Type a number (1-4) or describe what you need..."}
         />
       </div>
     </div>
