@@ -3,8 +3,16 @@ import { ChatMessage } from './ChatMessage'
 import { ChatInput } from './ChatInput'
 import { TypingIndicator } from './TypingIndicator'
 import { ScrollArea } from '@/components/ui/scroll-area'
-import { blink } from '@/blink/client'
+import { createClient } from '@blinkdotnew/sdk'
+import { fraudService } from '../services/fraudService'
+import { authService } from '../services/authService'
+import { documentService } from '../services/documentService'
 import { nanoid } from 'nanoid'
+
+const blink = createClient({
+  projectId: 'fraudshield-fraud-verification-bot-o5eoynan',
+  authRequired: true
+})
 
 interface Message {
   id: string
@@ -19,28 +27,8 @@ export function FraudShieldChat() {
   const [isTyping, setIsTyping] = useState(false)
   const [currentFlow, setCurrentFlow] = useState<string | null>(null)
   const [user, setUser] = useState<any>(null)
+  const [companyProfile, setCompanyProfile] = useState<any>(null)
   const scrollAreaRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    const unsubscribe = blink.auth.onAuthStateChanged((state) => {
-      setUser(state.user)
-      if (state.user && messages.length === 0) {
-        // Send welcome message
-        addBotMessage(getWelcomeMessage())
-      }
-    })
-    return unsubscribe
-  }, [])
-
-  useEffect(() => {
-    // Auto-scroll to bottom when new messages arrive
-    if (scrollAreaRef.current) {
-      const scrollElement = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]')
-      if (scrollElement) {
-        scrollElement.scrollTop = scrollElement.scrollHeight
-      }
-    }
-  }, [messages, isTyping])
 
   const addBotMessage = (content: string, type: Message['type'] = 'text') => {
     const message: Message = {
@@ -78,6 +66,158 @@ Simply type the number (1-4) or describe what you need help with!`
     await new Promise(resolve => setTimeout(resolve, duration))
     setIsTyping(false)
   }
+
+  const handleEftPopVerification = async (message: string, files?: File[]) => {
+    await simulateTyping(2000)
+    
+    try {
+      // Extract payment details from message (simplified)
+      const bankName = message.includes('FNB') ? 'FNB' : 
+                      message.includes('Standard') ? 'Standard Bank' :
+                      message.includes('ABSA') ? 'ABSA' : 'Unknown Bank'
+      
+      const referenceMatch = message.match(/ref[erence]*\s*:?\s*([a-zA-Z0-9]+)/i)
+      const reference = referenceMatch ? referenceMatch[1] : '483920'
+      
+      const amountMatch = message.match(/R\s*([0-9,]+(?:\.[0-9]{2})?)/i)
+      const amount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 12500
+
+      // Use fraud service for verification
+      const result = await fraudService.verifyPayment({
+        bankName,
+        reference,
+        amount
+      })
+
+      addBotMessage(`🔎 Checking payment against your linked bank account...<br/><br/>
+${result.message}<br/><br/>
+${result.status === 'verified' ? 
+  'Do you want me to generate a release PIN for your driver? (Yes/No)' : 
+  'Do you want to save this check to your log? (Yes/No)'}`, 'verification')
+
+    } catch (error) {
+      console.error('Payment verification error:', error)
+      addBotMessage(`❌ Unable to verify payment at this time. Please try again or contact support.`, 'verification')
+    }
+  }
+
+  const handleRfqPoVerification = async (message: string, files?: File[]) => {
+    await simulateTyping(2500)
+    
+    try {
+      let documentContent = message
+      
+      // If files are uploaded, process them
+      if (files && files.length > 0) {
+        const file = files[0]
+        const uploadedDoc = await documentService.uploadDocument(file, 'rfq')
+        documentContent = uploadedDoc.extractedText || message
+      }
+
+      // Use fraud service for document verification
+      const result = await fraudService.verifyDocument({
+        documentType: 'rfq',
+        content: documentContent
+      })
+
+      addBotMessage(`🔎 Verifying document details:<br/>
+✅ Checking domain legitimacy<br/>
+✅ Matching company name against registry<br/>
+✅ Checking contact details<br/><br/>
+${result.message}`, 'verification')
+
+    } catch (error) {
+      console.error('Document verification error:', error)
+      addBotMessage(`❌ Unable to verify document at this time. Please try again or contact support.`, 'verification')
+    }
+  }
+
+  const handleReleasePinGeneration = async (message: string) => {
+    await simulateTyping(1500)
+    
+    try {
+      // Extract customer name and amount from message
+      const parts = message.split(',')
+      const customerName = parts[0]?.trim() || 'Unknown Customer'
+      const amountMatch = message.match(/R\s*([0-9,]+(?:\.[0-9]{2})?)/i)
+      const orderAmount = amountMatch ? parseFloat(amountMatch[1].replace(/,/g, '')) : 0
+
+      // Generate PIN using fraud service
+      const result = await fraudService.generateDriverPin({
+        customerName,
+        orderAmount
+      })
+
+      addBotMessage(`🔎 Checking previous verification...<br/>
+✅ Payment verified.<br/><br/>
+🔐 <strong>Release PIN for driver: ${result.pin}</strong><br/><br/>
+Share this PIN only when handing over goods.<br/><br/>
+<em>PIN expires in 24 hours.</em>`, 'pin')
+
+    } catch (error) {
+      console.error('PIN generation error:', error)
+      addBotMessage(`❌ Unable to generate PIN at this time. Please try again or contact support.`, 'verification')
+    }
+  }
+
+  const handleLogView = async () => {
+    await simulateTyping(1000)
+    
+    try {
+      // Fetch fraud logs using fraud service
+      const logs = await fraudService.getFraudLogs()
+
+      const logContent = logs.length > 0 
+        ? `📜 <strong>Today's Fraud Check Log</strong><br/><br/>
+${logs.map((log, index) => 
+  `${index + 1}. ${log.verificationType?.replace('_', ' ').toUpperCase()} - ${log.verificationResult?.toUpperCase()}<br/>
+   Amount: R${log.amount || 0}<br/>
+   Time: ${new Date(log.createdAt).toLocaleTimeString()}<br/>`
+).join('<br/>')}<br/>
+<em>PDF report would be generated and attached in production.</em><br/><br/>
+To view logs for a specific date, type: log YYYY-MM-DD`
+        : `📜 <strong>Today's Fraud Check Log</strong><br/><br/>
+No fraud checks performed today.<br/><br/>
+To view logs for a specific date, type: log YYYY-MM-DD`
+
+      addBotMessage(logContent, 'log')
+
+    } catch (error) {
+      console.error('Log fetch error:', error)
+      addBotMessage(`❌ Unable to fetch logs at this time. Please try again.`, 'log')
+    }
+  }
+
+  useEffect(() => {
+    const unsubscribe = blink.auth.onAuthStateChanged(async (state) => {
+      setUser(state.user)
+      if (state.user) {
+        // Load company profile
+        try {
+          const profile = await authService.getCompanyProfile()
+          setCompanyProfile(profile)
+        } catch (error) {
+          console.error('Error loading company profile:', error)
+        }
+
+        if (messages.length === 0) {
+          // Send welcome message
+          addBotMessage(getWelcomeMessage())
+        }
+      }
+    })
+    return unsubscribe
+  }, [messages.length])
+
+  useEffect(() => {
+    // Auto-scroll to bottom when new messages arrive
+    if (scrollAreaRef.current) {
+      const scrollElement = scrollAreaRef.current.querySelector('[data-radix-scroll-area-viewport]')
+      if (scrollElement) {
+        scrollElement.scrollTop = scrollElement.scrollHeight
+      }
+    }
+  }, [messages, isTyping])
 
   const handleSendMessage = async (message: string, files?: File[]) => {
     if (!user) return
@@ -146,164 +286,6 @@ Type a number or describe what you need!`)
     }
   }
 
-  const handleEftPopVerification = async (message: string, files?: File[]) => {
-    await simulateTyping(2000)
-    
-    // Simulate payment verification
-    const isCleared = Math.random() > 0.3 // 70% chance of being cleared
-    
-    if (isCleared) {
-      // Store verification in database
-      await blink.db.paymentVerifications.create({
-        id: nanoid(),
-        userId: user.id,
-        bankName: 'FNB', // Extract from message in real implementation
-        reference: '483920',
-        amount: 'R12,500',
-        status: 'cleared',
-        verificationDetails: JSON.stringify({
-          verifiedAt: new Date().toISOString(),
-          bankResponse: 'Payment cleared successfully'
-        })
-      })
-
-      addBotMessage(`🔎 Checking payment against your linked bank account...<br/><br/>
-✅ <strong>Payment verified:</strong> R12,500 cleared from ABC Foods.<br/><br/>
-Do you want me to generate a release PIN for your driver? (Yes/No)`, 'verification')
-    } else {
-      addBotMessage(`🔎 Checking payment against your linked bank account...<br/><br/>
-🚨 <strong>Warning:</strong> No cleared payment found for this transaction. Please wait until funds reflect before delivering.<br/><br/>
-Do you want to save this check to your log? (Yes/No)`, 'verification')
-    }
-
-    // Log the fraud check
-    await blink.db.fraudChecks.create({
-      id: nanoid(),
-      userId: user.id,
-      checkType: 'eft_pop',
-      status: isCleared ? 'verified' : 'suspicious',
-      details: JSON.stringify({
-        message,
-        files: files?.map(f => f.name) || [],
-        result: isCleared ? 'cleared' : 'not_cleared'
-      })
-    })
-  }
-
-  const handleRfqPoVerification = async (message: string, files?: File[]) => {
-    await simulateTyping(2500)
-    
-    // Simulate document verification
-    const isLegitimate = Math.random() > 0.4 // 60% chance of being legitimate
-    
-    if (isLegitimate) {
-      addBotMessage(`🔎 Verifying document details:<br/>
-✅ Checking domain legitimacy<br/>
-✅ Matching company name against registry<br/>
-✅ Checking contact details<br/><br/>
-✅ <strong>RFQ/PO appears authentic</strong> and issued by a registered company (XYZ Supplies, Reg #2023/4567).`, 'verification')
-    } else {
-      addBotMessage(`🔎 Verifying document details:<br/>
-✅ Checking domain legitimacy<br/>
-✅ Matching company name against registry<br/>
-✅ Checking contact details<br/><br/>
-🚨 <strong>Warning:</strong> Domain "gov‑za.org" does NOT match official government domain. PO may be fraudulent. Please confirm with official contact.`, 'verification')
-    }
-
-    // Store verification in database
-    await blink.db.documentVerifications.create({
-      id: nanoid(),
-      userId: user.id,
-      documentType: 'rfq',
-      companyName: 'XYZ Supplies',
-      domain: 'xyzsupplies.com',
-      status: isLegitimate ? 'verified' : 'suspicious',
-      verificationDetails: JSON.stringify({
-        verifiedAt: new Date().toISOString(),
-        checks: ['domain', 'company_registry', 'contact_details']
-      })
-    })
-
-    // Log the fraud check
-    await blink.db.fraudChecks.create({
-      id: nanoid(),
-      userId: user.id,
-      checkType: 'rfq_po',
-      status: isLegitimate ? 'verified' : 'suspicious',
-      details: JSON.stringify({
-        message,
-        files: files?.map(f => f.name) || [],
-        result: isLegitimate ? 'legitimate' : 'suspicious'
-      })
-    })
-  }
-
-  const handleReleasePinGeneration = async (message: string) => {
-    await simulateTyping(1500)
-    
-    // Generate random 6-digit PIN
-    const pin = Math.floor(100000 + Math.random() * 900000).toString()
-    
-    // Store PIN in database
-    await blink.db.releasePins.create({
-      id: nanoid(),
-      userId: user.id,
-      customerName: 'ABC Foods', // Extract from message in real implementation
-      orderAmount: 'R12,500',
-      pinCode: pin,
-      status: 'active',
-      expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString() // 24 hours
-    })
-
-    addBotMessage(`🔎 Checking previous verification...<br/>
-✅ Payment verified.<br/><br/>
-🔐 <strong>Release PIN for driver: ${pin}</strong><br/><br/>
-Share this PIN only when handing over goods.<br/><br/>
-<em>PIN expires in 24 hours.</em>`, 'pin')
-
-    // Log the fraud check
-    await blink.db.fraudChecks.create({
-      id: nanoid(),
-      userId: user.id,
-      checkType: 'release_pin',
-      status: 'verified',
-      details: JSON.stringify({
-        customerName: 'ABC Foods',
-        orderAmount: 'R12,500',
-        pinGenerated: pin
-      })
-    })
-  }
-
-  const handleLogView = async () => {
-    await simulateTyping(1000)
-    
-    // Fetch today's fraud checks
-    const today = new Date().toISOString().split('T')[0]
-    const checks = await blink.db.fraudChecks.list({
-      where: { 
-        userId: user.id,
-        // In a real implementation, you'd filter by date
-      },
-      orderBy: { createdAt: 'desc' },
-      limit: 10
-    })
-
-    const logContent = checks.length > 0 
-      ? `📜 <strong>Today's Fraud Check Log</strong><br/><br/>
-${checks.map((check, index) => 
-  `${index + 1}. ${check.checkType.replace('_', ' ').toUpperCase()} - ${check.status.toUpperCase()}<br/>
-   Time: ${new Date(check.createdAt).toLocaleTimeString()}<br/>`
-).join('<br/>')}<br/>
-<em>PDF report would be generated and attached in production.</em><br/><br/>
-To view logs for a specific date, type: log YYYY-MM-DD`
-      : `📜 <strong>Today's Fraud Check Log</strong><br/><br/>
-No fraud checks performed today.<br/><br/>
-To view logs for a specific date, type: log YYYY-MM-DD`
-
-    addBotMessage(logContent, 'log')
-  }
-
   if (!user) {
     return (
       <div className="flex items-center justify-center h-screen">
@@ -322,10 +304,16 @@ To view logs for a specific date, type: log YYYY-MM-DD`
         <div className="w-10 h-10 bg-primary rounded-full flex items-center justify-center">
           <span className="text-primary-foreground font-bold text-lg">🛡️</span>
         </div>
-        <div>
+        <div className="flex-1">
           <h1 className="font-semibold text-lg">FraudShield</h1>
           <p className="text-sm text-muted-foreground">✅ Verified Business Account</p>
         </div>
+        {companyProfile && (
+          <div className="text-right">
+            <p className="text-sm font-medium">{companyProfile.companyName}</p>
+            <p className="text-xs text-muted-foreground">{user.email}</p>
+          </div>
+        )}
       </div>
 
       {/* Messages */}
