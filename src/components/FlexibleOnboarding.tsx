@@ -9,11 +9,18 @@ import { Progress } from './ui/progress'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog'
 import { Alert, AlertDescription } from './ui/alert'
-import { Upload, CheckCircle, AlertCircle, Star, Users, Shield, Trophy } from 'lucide-react'
+import { Upload, CheckCircle, AlertCircle, Star, Users, Shield, Trophy, X } from 'lucide-react'
 import { onboardingService, USER_TIERS, ENDORSEMENT_TYPES, type VerificationStep, type UserEndorsement } from '../services/onboardingService'
 
 interface FlexibleOnboardingProps {
   onComplete: (userProfile: any) => void
+}
+
+interface FormErrors {
+  email?: string
+  phone?: string
+  businessName?: string
+  general?: string
 }
 
 export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
@@ -32,6 +39,7 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
     },
     proofOfTrade: null as File | null
   })
+  const [formErrors, setFormErrors] = useState<FormErrors>({})
   const [loading, setLoading] = useState(false)
   const [verificationSteps, setVerificationSteps] = useState<VerificationStep[]>([])
   const [userProfile, setUserProfile] = useState<any>(null)
@@ -43,8 +51,44 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
     'Complete Setup'
   ]
 
+  // Validation functions
+  const validateEmail = (email: string): string | null => {
+    if (!email.trim()) return 'Email is required'
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+    if (!emailRegex.test(email)) return 'Please enter a valid email address'
+    return null
+  }
+
+  const validatePhone = (phone: string): string | null => {
+    if (!phone.trim()) return 'Phone number is required'
+    const phoneRegex = /^(\+27|0)[0-9]{9}$/
+    if (!phoneRegex.test(phone.replace(/\s/g, ''))) {
+      return 'Please enter a valid South African phone number'
+    }
+    return null
+  }
+
+  const validateStep2 = (): boolean => {
+    const errors: FormErrors = {}
+    
+    const emailError = validateEmail(formData.email)
+    if (emailError) errors.email = emailError
+
+    const phoneError = validatePhone(formData.phone)
+    if (phoneError) errors.phone = phoneError
+
+    // Business name validation for certain tiers
+    if ((selectedTier === 'informal_seller' || selectedTier === 'registered_business') && !formData.businessName.trim()) {
+      errors.businessName = 'Business name is required for this tier'
+    }
+
+    setFormErrors(errors)
+    return Object.keys(errors).length === 0
+  }
+
   const handleTierSelect = (tierType: string) => {
     setSelectedTier(tierType)
+    setFormErrors({}) // Clear any previous errors
   }
 
   const handleInputChange = (field: string, value: string) => {
@@ -63,6 +107,14 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
         [field]: value
       }))
     }
+
+    // Clear field-specific errors when user starts typing
+    if (formErrors[field as keyof FormErrors]) {
+      setFormErrors(prev => ({
+        ...prev,
+        [field]: undefined
+      }))
+    }
   }
 
   const handleFileUpload = (file: File) => {
@@ -73,7 +125,14 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
   }
 
   const handleCreateProfile = async () => {
+    // Validate form before submission
+    if (!validateStep2()) {
+      return
+    }
+
     setLoading(true)
+    setFormErrors({})
+
     try {
       const profile = await onboardingService.createUserProfile({
         email: formData.email,
@@ -86,9 +145,12 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
       setUserProfile(profile)
       const steps = await onboardingService.getVerificationProgress(profile.id)
       setVerificationSteps(steps)
-      setCurrentStep(2)
+      setCurrentStep(2) // Move to verification steps
     } catch (error) {
       console.error('Error creating profile:', error)
+      setFormErrors({
+        general: 'Failed to create profile. Please try again.'
+      })
     } finally {
       setLoading(false)
     }
@@ -114,6 +176,14 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
     if (verificationSteps.length === 0) return 0
     const completed = verificationSteps.filter(step => step.completed).length
     return Math.round((completed / verificationSteps.length) * 100)
+  }
+
+  const canProceedToStep2 = () => {
+    return selectedTier !== ''
+  }
+
+  const canProceedToStep3 = () => {
+    return userProfile !== null
   }
 
   const renderTierSelection = () => (
@@ -171,7 +241,7 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
       <Button 
         onClick={() => setCurrentStep(1)} 
         className="w-full"
-        disabled={!selectedTier}
+        disabled={!canProceedToStep2()}
       >
         Continue with {USER_TIERS[selectedTier]?.label}
       </Button>
@@ -185,6 +255,15 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
         <p className="text-gray-600">Tell us about yourself and your business</p>
       </div>
 
+      {formErrors.general && (
+        <Alert className="border-red-200 bg-red-50">
+          <AlertCircle className="h-4 w-4 text-red-600" />
+          <AlertDescription className="text-red-600">
+            {formErrors.general}
+          </AlertDescription>
+        </Alert>
+      )}
+
       <div className="space-y-4">
         <div>
           <Label htmlFor="email">Email Address *</Label>
@@ -194,8 +273,12 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
             value={formData.email}
             onChange={(e) => handleInputChange('email', e.target.value)}
             placeholder="your@email.com"
+            className={formErrors.email ? 'border-red-500 focus:border-red-500' : ''}
             required
           />
+          {formErrors.email && (
+            <p className="text-sm text-red-600 mt-1">{formErrors.email}</p>
+          )}
         </div>
 
         <div>
@@ -205,19 +288,29 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
             type="tel"
             value={formData.phone}
             onChange={(e) => handleInputChange('phone', e.target.value)}
-            placeholder="+27 XX XXX XXXX"
+            placeholder="+27 XX XXX XXXX or 0XX XXX XXXX"
+            className={formErrors.phone ? 'border-red-500 focus:border-red-500' : ''}
             required
           />
+          {formErrors.phone && (
+            <p className="text-sm text-red-600 mt-1">{formErrors.phone}</p>
+          )}
         </div>
 
         <div>
-          <Label htmlFor="businessName">Business Name</Label>
+          <Label htmlFor="businessName">
+            Business Name {(selectedTier === 'informal_seller' || selectedTier === 'registered_business') && '*'}
+          </Label>
           <Input
             id="businessName"
             value={formData.businessName}
             onChange={(e) => handleInputChange('businessName', e.target.value)}
-            placeholder="Your business name (optional)"
+            placeholder="Your business name"
+            className={formErrors.businessName ? 'border-red-500 focus:border-red-500' : ''}
           />
+          {formErrors.businessName && (
+            <p className="text-sm text-red-600 mt-1">{formErrors.businessName}</p>
+          )}
         </div>
 
         {(selectedTier === 'informal_seller' || selectedTier === 'registered_business') && (
@@ -271,7 +364,7 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
         </Button>
         <Button 
           onClick={handleCreateProfile}
-          disabled={!formData.email || !formData.phone || loading}
+          disabled={loading}
           className="flex-1"
         >
           {loading ? 'Creating Profile...' : 'Create Profile'}
@@ -339,7 +432,7 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
           Back
         </Button>
         <Button onClick={() => setCurrentStep(3)} className="flex-1">
-          Continue
+          Continue to Final Step
         </Button>
       </div>
     </div>
@@ -370,7 +463,7 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
               <span>Trust Level:</span>
               <div className="flex items-center gap-2">
                 <Star className="h-4 w-4 text-yellow-500" />
-                <span>{userProfile?.trustLevel || 0}/100</span>
+                <span>{userProfile?.trust_level || 0}/100</span>
               </div>
             </div>
           </div>
@@ -387,9 +480,14 @@ export function FlexibleOnboarding({ onComplete }: FlexibleOnboardingProps) {
         </div>
       </div>
 
-      <Button onClick={handleFinishOnboarding} className="w-full">
-        Start Using FraudShield
-      </Button>
+      <div className="flex gap-3">
+        <Button variant="outline" onClick={() => setCurrentStep(2)}>
+          Back to Verification
+        </Button>
+        <Button onClick={handleFinishOnboarding} className="flex-1">
+          Start Using FraudShield
+        </Button>
+      </div>
     </div>
   )
 

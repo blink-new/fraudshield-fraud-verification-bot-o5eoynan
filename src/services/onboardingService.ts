@@ -81,18 +81,18 @@ class OnboardingService {
       
       const profile = await blink.db.companies.create({
         id: `user_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        userId: user.id,
+        user_id: user.id,
         name: userData.businessName || userData.email.split('@')[0],
         email: userData.email,
         phone: userData.phone,
-        userType: userData.userType,
-        verificationLevel: 'unverified',
-        trustLevel: 0,
-        socialMediaLinks: JSON.stringify(userData.socialMediaLinks || {}),
-        verificationDocuments: JSON.stringify([]),
-        endorsementsCount: 0,
-        verificationNudgesCount: 0,
-        createdAt: new Date().toISOString()
+        user_type: userData.userType,
+        verification_level: 'unverified',
+        trust_level: 0,
+        social_media_links: JSON.stringify(userData.socialMediaLinks || {}),
+        verification_documents: JSON.stringify([]),
+        endorsements_count: 0,
+        verification_nudges_count: 0,
+        created_at: new Date().toISOString()
       })
 
       // Initialize verification steps
@@ -112,10 +112,10 @@ class OnboardingService {
     for (const stepName of steps) {
       await blink.db.verificationProgress.create({
         id: `step_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        userId,
-        stepName,
+        user_id: userId,
+        step_name: stepName,
         completed: false,
-        createdAt: new Date().toISOString()
+        created_at: new Date().toISOString()
       })
     }
   }
@@ -123,15 +123,15 @@ class OnboardingService {
   async getVerificationProgress(userId: string): Promise<VerificationStep[]> {
     try {
       const steps = await blink.db.verificationProgress.list({
-        where: { userId },
-        orderBy: { createdAt: 'asc' }
+        where: { user_id: userId },
+        orderBy: { created_at: 'asc' }
       })
 
       return steps.map(step => ({
         id: step.id,
-        name: step.stepName,
-        description: this.getStepDescription(step.stepName),
-        required: this.isStepRequired(step.stepName),
+        name: step.step_name,
+        description: this.getStepDescription(step.step_name),
+        required: this.isStepRequired(step.step_name),
         completed: Number(step.completed) > 0,
         data: step.data ? JSON.parse(step.data) : null
       }))
@@ -163,13 +163,13 @@ class OnboardingService {
   async completeVerificationStep(userId: string, stepName: string, data?: any) {
     try {
       const steps = await blink.db.verificationProgress.list({
-        where: { userId, stepName }
+        where: { user_id: userId, step_name: stepName }
       })
 
       if (steps.length > 0) {
         await blink.db.verificationProgress.update(steps[0].id, {
           completed: true,
-          completedAt: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
           data: data ? JSON.stringify(data) : null
         })
 
@@ -185,7 +185,7 @@ class OnboardingService {
   async updateUserVerificationLevel(userId: string) {
     try {
       const user = await blink.db.companies.list({
-        where: { userId }
+        where: { user_id: userId }
       })
 
       if (user.length === 0) return
@@ -196,7 +196,7 @@ class OnboardingService {
       const totalSteps = progress.length
 
       let verificationLevel = 'unverified'
-      let trustLevel = userProfile.trustLevel || 0
+      let trustLevel = userProfile.trust_level || 0
 
       if (completedSteps >= totalSteps) {
         verificationLevel = 'premium'
@@ -210,8 +210,8 @@ class OnboardingService {
       }
 
       await blink.db.companies.update(userProfile.id, {
-        verificationLevel,
-        trustLevel
+        verification_level: verificationLevel,
+        trust_level: trustLevel
       })
     } catch (error) {
       console.error('Error updating verification level:', error)
@@ -224,23 +224,23 @@ class OnboardingService {
       
       const endorsement = await blink.db.userEndorsements.create({
         id: `endorsement_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        endorserId: user.id,
-        endorsedId: endorsedUserId,
-        endorsementType,
+        endorser_id: user.id,
+        endorsed_id: endorsedUserId,
+        endorsement_type: endorsementType,
         message: message || '',
-        createdAt: new Date().toISOString()
+        created_at: new Date().toISOString()
       })
 
       // Update endorsement count
       const endorsedUser = await blink.db.companies.list({
-        where: { userId: endorsedUserId }
+        where: { user_id: endorsedUserId }
       })
 
       if (endorsedUser.length > 0) {
-        const currentCount = endorsedUser[0].endorsementsCount || 0
+        const currentCount = endorsedUser[0].endorsements_count || 0
         await blink.db.companies.update(endorsedUser[0].id, {
-          endorsementsCount: currentCount + 1,
-          trustLevel: Math.min((endorsedUser[0].trustLevel || 0) + 5, 100)
+          endorsements_count: currentCount + 1,
+          trust_level: Math.min((endorsedUser[0].trust_level || 0) + 5, 100)
         })
       }
 
@@ -254,25 +254,25 @@ class OnboardingService {
   async getUserEndorsements(userId: string): Promise<UserEndorsement[]> {
     try {
       const endorsements = await blink.db.userEndorsements.list({
-        where: { endorsedId: userId },
-        orderBy: { createdAt: 'desc' }
+        where: { endorsed_id: userId },
+        orderBy: { created_at: 'desc' }
       })
 
       // Get endorser details
       const endorsementsWithDetails = await Promise.all(
         endorsements.map(async (endorsement) => {
           const endorser = await blink.db.companies.list({
-            where: { userId: endorsement.endorserId }
+            where: { user_id: endorsement.endorser_id }
           })
 
           return {
             id: endorsement.id,
-            endorserId: endorsement.endorserId,
-            endorsedId: endorsement.endorsedId,
+            endorserId: endorsement.endorser_id,
+            endorsedId: endorsement.endorsed_id,
             endorserName: endorser.length > 0 ? endorser[0].name : 'Anonymous',
-            endorsementType: endorsement.endorsementType as any,
+            endorsementType: endorsement.endorsement_type as any,
             message: endorsement.message,
-            createdAt: endorsement.createdAt
+            createdAt: endorsement.created_at
           }
         })
       )
@@ -288,23 +288,23 @@ class OnboardingService {
     try {
       await blink.db.verificationNudges.create({
         id: `nudge_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
-        userId,
-        nudgeType,
-        sentAt: new Date().toISOString(),
+        user_id: userId,
+        nudge_type: nudgeType,
+        sent_at: new Date().toISOString(),
         clicked: false,
         completed: false
       })
 
       // Update nudge count
       const user = await blink.db.companies.list({
-        where: { userId }
+        where: { user_id: userId }
       })
 
       if (user.length > 0) {
-        const currentCount = user[0].verificationNudgesCount || 0
+        const currentCount = user[0].verification_nudges_count || 0
         await blink.db.companies.update(user[0].id, {
-          verificationNudgesCount: currentCount + 1,
-          lastNudgeDate: new Date().toISOString()
+          verification_nudges_count: currentCount + 1,
+          last_nudge_date: new Date().toISOString()
         })
       }
     } catch (error) {
